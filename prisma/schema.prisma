@@ -1,0 +1,273 @@
+// Agentum — TermiX(agent.family)复刻 · 数据模型
+// 一次设计覆盖 P1–P5:用户/子账号 · 服务挂单 · 任务生命周期 · 消息 · 积分 · 声誉
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────────────────
+// 枚举
+// ─────────────────────────────────────────────────────────
+
+enum AgentRole {
+  PROVIDER
+  EVALUATOR
+  CLIENT
+  ARBITRATOR
+}
+
+enum Category {
+  CODE // Code & Smart Contracts
+  SECURITY // Security & Verification
+  DATA // Data & Research
+  DESIGN // Design & Brand
+}
+
+enum JobStatus {
+  QUOTED // 已发起报价
+  ACCEPTED // provider 接受
+  ESCROWED // 资金已链上托管
+  DELIVERED // 已交付(哈希锁链上)
+  CHALLENGED // 挑战窗口内被质疑
+  SETTLED // 结算完成、资金释放
+  DISPUTED // 进入评估员裁决
+  REFUNDED // 退款给 client
+  CANCELLED // 取消
+}
+
+// ─────────────────────────────────────────────────────────
+// 账号:User(钱包) → 多个 ProviderAgent 子账号
+// ─────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(cuid())
+  address   String   @unique // 钱包地址(小写存储)
+  handle    String?  @unique // 展示用 @handle,如 user-9870d8
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  agents       ProviderAgent[]
+  jobsAsClient Job[]           @relation("ClientJobs")
+  requests     JobRequest[]
+  points       PointsEntry[]
+  sentMsgs     Message[]       @relation("SentMessages")
+  recvMsgs     Message[]       @relation("ReceivedMessages")
+}
+
+// 一个 provider 子账号 = 一个 .agent 身份
+model ProviderAgent {
+  id           String    @id @default(cuid())
+  handle       String    @unique // 如 "prompthaborr"(不含 .agent 后缀)
+  displayName  String
+  role         AgentRole @default(PROVIDER)
+  category     Category  @default(CODE)
+  bio          String    @default("")
+  avatarUrl    String?
+  tags         String[]  @default([])
+  verified     Boolean   @default(false)
+  availableNow Boolean   @default(true)
+
+  // 声誉五维(链上回填,链下缓存)
+  reputation    Int @default(100)
+  jobsCompleted Int @default(0)
+  onTimeRate    Int @default(100) // 百分比
+  passRate      Int @default(100) // 百分比
+  disputesWon   Int @default(0)
+
+  // 质押池
+  stakedAmount String @default("0") // wei 字符串,避免精度问题
+  lockedAmount String @default("0")
+
+  // 链上身份
+  chainTokenId   String? // AgentIdentity NFT tokenId
+  identityTxHash String?
+
+  ownerId   String
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  services  Service[]
+  jobs      Job[]     @relation("ProviderJobs")
+  bids      Bid[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([category])
+  @@index([role])
+}
+
+// 服务挂单
+model Service {
+  id           String   @id @default(cuid())
+  title        String
+  category     Category
+  description  String   @default("")
+  priceUsdc    Int // 起价,整数 USDC
+  deliveryDays Int      @default(3)
+  coverImage   String?
+  active       Boolean  @default(true)
+
+  providerId String
+  provider   ProviderAgent @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  jobs       Job[]
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@index([category])
+}
+
+// 任务
+model Job {
+  id     String    @id @default(cuid())
+  status JobStatus @default(QUOTED)
+  title  String
+  brief  String    @default("")
+  amount Int // USDC 金额
+
+  // 链上痕迹
+  chainJobId      String? // JobEscrow 合约里的 jobId
+  escrowTxHash    String?
+  deliverableHash String? // 交付物哈希(链上锁定)
+  deliverableUrl  String?
+  settleTxHash    String?
+
+  challengeUntil DateTime? // 挑战窗口截止
+
+  clientId   String
+  client     User          @relation("ClientJobs", fields: [clientId], references: [id])
+  providerId String
+  provider   ProviderAgent @relation("ProviderJobs", fields: [providerId], references: [id])
+  serviceId  String?
+  service    Service?      @relation(fields: [serviceId], references: [id])
+
+  events      JobEvent[]
+  evaluations Evaluation[]
+  messages    Message[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([status])
+  @@index([clientId])
+  @@index([providerId])
+}
+
+// 任务生命周期事件流(用于 Verify / proof trail)
+model JobEvent {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  kind      String // quoted | accepted | escrowed | delivered | challenged | settled | ...
+  txHash    String?
+  note      String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+}
+
+// 评估/裁决(挑战窗口内的 3 评估员面板)
+model Evaluation {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  evaluator String // 评估员 agent handle 或地址
+  verdict   Boolean // true = pass, false = fail
+  reason    String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+}
+
+// 站内信
+model Message {
+  id        String    @id @default(cuid())
+  body      String
+  jobId     String?
+  job       Job?      @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  fromId    String
+  from      User      @relation("SentMessages", fields: [fromId], references: [id])
+  toId      String
+  to        User      @relation("ReceivedMessages", fields: [toId], references: [id])
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([toId])
+  @@index([fromId])
+}
+
+// 积分
+model PointsEntry {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount    Int
+  reason    String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Open Brief:客户端发布的公开需求
+model JobRequest {
+  id             String    @id @default(cuid())
+  chainRequestId String? // 链上 requestId
+  postTxHash     String?
+  title          String
+  brief          String    @default("")
+  category       Category  @default(CODE)
+  budgetHint     Int? // 预算提示(USDC,可选)
+  open           Boolean   @default(true)
+  acceptedJobId  String?
+
+  clientId  String
+  client    User     @relation(fields: [clientId], references: [id])
+  bids      Bid[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([open])
+  @@index([category])
+}
+
+// provider 对需求的报价
+model Bid {
+  id            String   @id @default(cuid())
+  chainBidIndex Int? // 链上 bidsByRequest 里的 index
+  bidTxHash     String?
+  amount        Int // USDC
+  deliveryDays  Int
+  message       String   @default("")
+  active        Boolean  @default(true)
+
+  requestId  String
+  request    JobRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   ProviderAgent @relation(fields: [providerId], references: [id])
+  createdAt  DateTime      @default(now())
+
+  @@index([requestId])
+}
+
+// 上传的媒体(头像 / 交付物),存 Postgres bytea,经 /api/media/[id] 提供
+model MediaAsset {
+  id          String   @id @default(cuid())
+  contentType String
+  size        Int
+  filename    String?
+  data        Bytes
+  createdAt   DateTime @default(now())
+}
+
+// 全站统计快照(落地页 LIVE 数据,链下聚合缓存)
+model MarketStat {
+  id             Int      @id @default(1)
+  totalEscrowed  Int      @default(0) // USDC
+  totalAgents    Int      @default(0)
+  totalJobs      Int      @default(0)
+  totalClients   Int      @default(0)
+  totalProviders Int      @default(0)
+  blockNumber    BigInt   @default(0)
+  updatedAt      DateTime @updatedAt
+}

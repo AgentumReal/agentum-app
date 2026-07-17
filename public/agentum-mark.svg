@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <!-- Agentum mark — transparent bg; four teardrops, white-hot center → mint → green -->
+  <defs>
+    <radialGradient id="rg" gradientUnits="userSpaceOnUse" cx="250" cy="250" r="195">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.10" stop-color="#E6FFD8"/>
+      <stop offset="0.38" stop-color="#A8FF60"/>
+      <stop offset="1" stop-color="#14F195"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g filter="url(#glow)" fill="url(#rg)">
+    <path d="M250 250 C213 205 172 190 172 135 A78 78 0 1 1 328 135 C328 190 287 205 250 250 Z"/>
+    <path d="M250 250 C213 205 172 190 172 135 A78 78 0 1 1 328 135 C328 190 287 205 250 250 Z" transform="rotate(90 250 250)"/>
+    <path d="M250 250 C213 205 172 190 172 135 A78 78 0 1 1 328 135 C328 190 287 205 250 250 Z" transform="rotate(180 250 250)"/>
+    <path d="M250 250 C213 205 172 190 172 135 A78 78 0 1 1 328 135 C328 190 287 205 250 250 Z" transform="rotate(270 250 250)"/>
+  </g>
+</svg>

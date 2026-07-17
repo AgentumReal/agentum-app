@@ -1,26 +1,112 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ─────────────────────────────────────────────────────────
+   Agentum 设计系统 —— 墨黑 + 薄荷青绿发光
+   配色锁定见 wiki/brand/visual-identity.md
+   ───────────────────────────────────────────────────────── */
+
+@theme {
+  /* 品牌色 */
+  --color-ink: #050a07; /* 墨黑主背景 */
+  --color-ink-2: #0a130e; /* 抬升表面 1 */
+  --color-ink-3: #0f1b15; /* 抬升表面 2(卡片) */
+  --color-mint: #a8ff60; /* 薄荷 */
+  --color-teal: #14f195; /* 青绿(主强调) */
+  --color-teal-dim: #0fbd75;
+
+  /* 语义色 */
+  --color-background: #050a07;
+  --color-foreground: #eafff4; /* 柔白带薄荷 */
+  --color-muted: #8aa79a; /* 次要文字 */
+  --color-faint: #5b7268; /* 更弱文字 */
+  --color-border: rgba(168, 255, 96, 0.1);
+  --color-border-strong: rgba(168, 255, 96, 0.22);
+  --color-surface: #0a130e;
+  --color-surface-2: #0f1b15;
+  --color-danger: #ff6b6b;
+  --color-warn: #ffcc4d;
+
+  /* 字体 */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* 圆角 */
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.75rem;
+
+  /* 动画 */
+  --animate-glow: glow 3s ease-in-out infinite;
+  --animate-float: float 6s ease-in-out infinite;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@keyframes glow {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
   }
 }
 
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+html {
+  color-scheme: dark;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-ink);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 品牌渐变文字 */
+.text-gradient {
+  background: linear-gradient(100deg, var(--color-mint), var(--color-teal));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 薄荷发光 */
+.glow-mint {
+  box-shadow:
+    0 0 0 1px rgba(20, 241, 149, 0.14),
+    0 12px 48px -12px rgba(20, 241, 149, 0.35);
+}
+
+/* 背景径向光晕 */
+.aura {
+  background:
+    radial-gradient(60% 50% at 50% 0%, rgba(20, 241, 149, 0.12), transparent 70%),
+    radial-gradient(40% 40% at 85% 20%, rgba(168, 255, 96, 0.08), transparent 70%);
+}
+
+/* 细网格 */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(168, 255, 96, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(168, 255, 96, 0.04) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+/* 隐藏滚动条(横向卡片列) */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
