@@ -14,6 +14,7 @@
  */
 import { config as dotenv } from "dotenv";
 import { resolve } from "path";
+import { writeFileSync, mkdirSync } from "fs";
 import {
   createPublicClient,
   createWalletClient,
@@ -405,6 +406,16 @@ async function main() {
   const clients = wallets.slice(0, nClients);
   const providers = wallets.slice(nClients);
   console.info(`  wallets: ${n}  (clients ${clients.length} / providers ${providers.length})`);
+
+  // 生成后立刻保存 keypair 到 gitignored CSV(跑之前就存,即使后面崩了也不丢私钥)
+  if (!CFG.dryRun) {
+    const dir = resolve(process.cwd(), "sim-wallets");
+    mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const rows = ["address,privateKey,role", ...wallets.map((w, i) => `${w.address},${w.pk},${i < nClients ? "client" : "provider"}`)];
+    writeFileSync(resolve(dir, `wallets-${ts}.csv`), rows.join("\n") + "\n");
+    console.info(`  ✓ saved ${wallets.length} keypairs → sim-wallets/wallets-${ts}.csv`);
+  }
 
   // 2) FUND 批量发 tBNB
   if (!CFG.dryRun) {
