@@ -413,24 +413,28 @@ async function main() {
     const need = parseEther(CFG.fundPerWallet) * BigInt(n);
     console.info(`  FUND ${fund.address}  balance=${formatEther(bal)} tBNB  need≈${formatEther(need)}`);
     if (bal < need) throw new Error(`FUND wallet has insufficient tBNB. Top up ${fund.address} and retry.`);
-    let baseNonce = await publicClient.getTransactionCount({ address: fund.address, blockTag: "pending" });
-    const hashes = await Promise.all(
-      wallets.map((w, i) =>
-        withRetry(
-          () =>
-            fund.client.sendTransaction({
-              to: w.address,
-              value: parseEther(CFG.fundPerWallet),
-              gasPrice: CFG.gasPrice,
-              nonce: baseNonce + i,
-            }),
-          4,
-          "fund",
-        ),
-      ),
-    );
-    await publicClient.waitForTransactionReceipt({ hash: hashes[hashes.length - 1] });
-    console.info(`  ✓ funded ${hashes.length} wallets`);
+    // 顺序发送 + 本地 nonce 递增,遇 nonce 类错误重新同步(应对高频复用钱包 + 公网 RPC 滞后)
+    const value = parseEther(CFG.fundPerWallet);
+    let nonce = await publicClient.getTransactionCount({ address: fund.address, blockTag: "pending" });
+    let lastHash: Hex | undefined;
+    let funded = 0;
+    for (const w of wallets) {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          lastHash = await fund.client.sendTransaction({ to: w.address, value, gasPrice: CFG.gasPrice, nonce });
+          nonce++;
+          funded++;
+          break;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/insufficient funds/i.test(msg)) throw e;
+          nonce = await publicClient.getTransactionCount({ address: fund.address, blockTag: "pending" });
+          await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+        }
+      }
+    }
+    if (lastHash) await publicClient.waitForTransactionReceipt({ hash: lastHash });
+    console.info(`  ✓ funded ${funded}/${n} wallets`);
   }
 
   // 3) 建 providers(mint 身份 + 建库 agent/service)
