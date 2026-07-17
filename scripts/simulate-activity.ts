@@ -32,6 +32,7 @@ import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { bscTestnet } from "viem/chains";
 import { PrismaClient } from "../lib/generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { Pool } from "pg";
 import { AgentIdentityAbi } from "../lib/web3/abis/AgentIdentity";
 import { MockUSDTAbi } from "../lib/web3/abis/MockUSDT";
 import { JobEscrowAbi } from "../lib/web3/abis/JobEscrow";
@@ -56,18 +57,18 @@ const CFG = {
   batchSize: Number(process.env.BATCH_SIZE ?? 100),
   clientRatio: Number(process.env.CLIENT_RATIO ?? 0.5),
   concurrency: Number(process.env.CONCURRENCY ?? 8),
-  fundPerWallet: process.env.FUND_PER_WALLET ?? "0.003",
+  fundPerWallet: process.env.FUND_PER_WALLET ?? "0.004",
   bidsMin: Number(process.env.BIDS_MIN ?? 1),
   bidsMax: Number(process.env.BIDS_MAX ?? 3),
   dryRun: !!process.env.DRY_RUN && process.env.DRY_RUN !== "0",
   rpc: process.env.RPC_URL || "https://bsc-testnet-rpc.publicnode.com",
   gasPrice: parseGwei(process.env.GAS_GWEI ?? "3"),
-  // job 最终状态分布(必须加起来 ≈ 1)
+  // job 最终状态分布(默认全部 settled → 资金全额放款给 provider,不留在 escrow)
   dist: {
-    settled: Number(process.env.RATE_SETTLED ?? 0.55),
-    delivered: Number(process.env.RATE_DELIVERED ?? 0.15),
-    escrowed: Number(process.env.RATE_ESCROWED ?? 0.12),
-    open: Number(process.env.RATE_OPEN ?? 0.18),
+    settled: Number(process.env.RATE_SETTLED ?? 1),
+    delivered: Number(process.env.RATE_DELIVERED ?? 0),
+    escrowed: Number(process.env.RATE_ESCROWED ?? 0),
+    open: Number(process.env.RATE_OPEN ?? 0),
   },
 };
 
@@ -83,7 +84,32 @@ if (!CFG.dryRun && (!FUND_PK || !ADDR.identity || !ADDR.escrow)) {
 }
 
 const publicClient = createPublicClient({ chain: bscTestnet, transport: http(CFG.rpc) });
-const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
+// 稳的连接池:keepAlive + 超时 + 上限,应对 Railway 公网代理掐连接
+const pgPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 6,
+  keepAlive: true,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 20_000,
+});
+pgPool.on("error", () => {}); // 忽略空闲连接被代理掐断的噪音,交给重试
+const prisma = new PrismaClient({ adapter: new PrismaPg(pgPool) });
+
+// DB 操作重试(连接类错误重试;逻辑错误不重试)
+async function dbOp<T>(fn: () => Promise<T>, tries = 4): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/terminated|ECONNRESET|Connection|timeout|socket|ETIMEDOUT|pool/i.test(msg)) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw last;
+}
 
 // ── 工具:并发限制 / 重试 / 每钱包串行 nonce ──
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
@@ -114,22 +140,13 @@ async function withRetry<T>(fn: () => Promise<T>, tries = 4, label = ""): Promis
   throw new Error(`${label} failed: ${last instanceof Error ? last.message : last}`);
 }
 
-// 每个钱包串行 + 自管 nonce,避免同一钱包并发交易 nonce 冲突
-const nonces = new Map<string, number>();
+// 每个钱包串行,避免同一钱包并发交易 nonce 冲突
 const chains = new Map<string, Promise<unknown>>();
 function onWallet<T>(addr: string, fn: () => Promise<T>): Promise<T> {
   const prev = chains.get(addr) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   chains.set(addr, next.catch(() => {}));
   return next as Promise<T>;
-}
-async function nextNonce(addr: Address): Promise<number> {
-  if (!nonces.has(addr)) {
-    nonces.set(addr, await publicClient.getTransactionCount({ address: addr, blockTag: "pending" }));
-  }
-  const n = nonces.get(addr)!;
-  nonces.set(addr, n + 1);
-  return n;
 }
 
 type Wallet = ReturnType<typeof makeWallet>;
@@ -150,35 +167,44 @@ async function write(
   eventKey?: string,
 ): Promise<{ txHash: Hex; value?: string }> {
   return onWallet(w.address, async () => {
-    // nonce 只取一次,重试复用(避免失败重试时跳号)
-    const nonce = await nextNonce(w.address);
-    return withRetry(async () => {
-      const hash = await w.client.writeContract({
-        address,
-        abi: abi as never,
-        functionName,
-        args,
-        gasPrice: CFG.gasPrice,
-        nonce,
-      });
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      let value: string | undefined;
-      if (eventName && eventKey) {
-        for (const log of receipt.logs) {
-          try {
-            const p = decodeEventLog({ abi: abi as never, data: log.data, topics: log.topics });
-            if (p.eventName === eventName) {
-              const v = (p.args as Record<string, unknown>)[eventKey];
-              value = typeof v === "bigint" ? v.toString() : String(v);
-              break;
+    let last: unknown;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        // 每次都从链上现取 nonce(串行 + 现取 → 自愈 RPC 视图不一致 / nonce too low)
+        const nonce = await publicClient.getTransactionCount({ address: w.address, blockTag: "pending" });
+        const hash = await w.client.writeContract({
+          address,
+          abi: abi as never,
+          functionName,
+          args,
+          gasPrice: CFG.gasPrice,
+          nonce,
+        });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        let value: string | undefined;
+        if (eventName && eventKey) {
+          for (const log of receipt.logs) {
+            try {
+              const p = decodeEventLog({ abi: abi as never, data: log.data, topics: log.topics });
+              if (p.eventName === eventName) {
+                const v = (p.args as Record<string, unknown>)[eventKey];
+                value = typeof v === "bigint" ? v.toString() : String(v);
+                break;
+              }
+            } catch {
+              /* not ours */
             }
-          } catch {
-            /* not ours */
           }
         }
+        return { txHash: hash, value };
+      } catch (e) {
+        last = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/reverted|insufficient funds for/i.test(msg)) throw e; // 逻辑错误,不重试
+        await new Promise((r) => setTimeout(r, 1200 * (attempt + 1))); // nonce/网络类:等一下,下轮重取 nonce 自愈
       }
-      return { txHash: hash, value };
-    }, 4, `${functionName}`);
+    }
+    throw new Error(`${functionName} failed: ${last instanceof Error ? last.message : last}`);
   });
 }
 
@@ -411,18 +437,22 @@ async function main() {
   const provIds = new Map<string, { agentId: string; category: Category; profile: ReturnType<typeof providerProfile> }>();
   console.info(`  setting up ${providers.length} providers…`);
   await mapLimit(providers, CFG.concurrency, async (w) => {
-    const profile = providerProfile();
-    const handle = await uniqueHandle(profile.handle);
-    profile.handle = handle;
-    profile.displayName = toDisplay(handle);
-    let tokenId: string | undefined, txHash: string | undefined;
-    if (!CFG.dryRun) {
-      const r = await write(w, ADDR.identity, AgentIdentityAbi, "mint", [w.address, handle], "IdentityMinted", "tokenId");
-      tokenId = r.value;
-      txHash = r.txHash;
+    try {
+      const profile = providerProfile();
+      const handle = await uniqueHandle(profile.handle);
+      profile.handle = handle;
+      profile.displayName = toDisplay(handle);
+      let tokenId: string | undefined, txHash: string | undefined;
+      if (!CFG.dryRun) {
+        const r = await write(w, ADDR.identity, AgentIdentityAbi, "mint", [w.address, handle], "IdentityMinted", "tokenId");
+        tokenId = r.value;
+        txHash = r.txHash;
+      }
+      const { agentId } = await dbOp(() => dbCreateProvider(w.address, profile, { tokenId, txHash }));
+      provIds.set(w.address, { agentId, category: profile.category, profile });
+    } catch (e) {
+      console.warn(`  ! provider ${w.address.slice(0, 10)} skipped: ${e instanceof Error ? e.message : e}`);
     }
-    const { agentId } = await dbCreateProvider(w.address, profile, { tokenId, txHash });
-    provIds.set(w.address, { agentId, category: profile.category, profile });
   });
   console.info(`  ✓ ${provIds.size} providers live in directory`);
 
@@ -430,14 +460,18 @@ async function main() {
   const clientIds = new Map<string, string>();
   console.info(`  setting up ${clients.length} clients…`);
   await mapLimit(clients, CFG.concurrency, async (w) => {
-    const handle = await uniqueHandle(makeHandle());
-    if (!CFG.dryRun) {
-      await write(w, ADDR.identity, AgentIdentityAbi, "mint", [w.address, handle]); // client DID
-      await write(w, ADDR.usdt, MockUSDTAbi, "mintTo", [w.address, parseUnits("5000", 18)]); // 领 USDT
-      await write(w, ADDR.usdt, MockUSDTAbi, "approve", [ADDR.escrow, parseUnits("1000000", 18)]); // 预授权
+    try {
+      const handle = await uniqueHandle(makeHandle());
+      if (!CFG.dryRun) {
+        await write(w, ADDR.identity, AgentIdentityAbi, "mint", [w.address, handle]); // client DID
+        await write(w, ADDR.usdt, MockUSDTAbi, "mintTo", [w.address, parseUnits("5000", 18)]); // 领 USDT
+        await write(w, ADDR.usdt, MockUSDTAbi, "approve", [ADDR.escrow, parseUnits("1000000", 18)]); // 预授权
+      }
+      const uid = await dbOp(() => dbCreateClient(w.address, handle));
+      clientIds.set(w.address, uid);
+    } catch (e) {
+      console.warn(`  ! client ${w.address.slice(0, 10)} skipped: ${e instanceof Error ? e.message : e}`);
     }
-    const uid = await dbCreateClient(w.address, handle);
-    clientIds.set(w.address, uid);
   });
   console.info(`  ✓ ${clientIds.size} clients ready`);
 
@@ -459,7 +493,7 @@ async function main() {
         chainRequestId = r.value;
         postTx = r.txHash;
       }
-      const requestId = await dbCreateRequest(clientId, brief, { chainRequestId, txHash: postTx });
+      const requestId = await dbOp(() => dbCreateRequest(clientId, brief, { chainRequestId, txHash: postTx }));
 
       // ② bids from random providers
       const bidders = pickRandom(providerList, randInt(CFG.bidsMin, CFG.bidsMax));
@@ -473,7 +507,7 @@ async function main() {
           chainBidIndex = r.value ? Number(r.value) : undefined;
           bidTx = r.txHash;
         }
-        const bidId = await dbCreateBid(requestId, pInfo.agentId, terms, { chainBidIndex, txHash: bidTx });
+        const bidId = await dbOp(() => dbCreateBid(requestId, pInfo.agentId, terms, { chainBidIndex, txHash: bidTx }));
         bids.push({ bidId, providerWallet: pw, providerId: pInfo.agentId, amount: terms.amount, chainBidIndex });
       }
 
@@ -490,7 +524,7 @@ async function main() {
         chainJobId = r.value;
         escrowTx = r.txHash;
       }
-      const jobId = await dbAcceptBid(requestId, clientId, winner.providerId, winner.amount, brief.title, brief.brief, { chainJobId, escrowTxHash: escrowTx });
+      const jobId = await dbOp(() => dbAcceptBid(requestId, clientId, winner.providerId, winner.amount, brief.title, brief.brief, { chainJobId, escrowTxHash: escrowTx }));
 
       if (finalState === "escrowed") {
         stats.escrowed++;
@@ -505,7 +539,7 @@ async function main() {
         const r = await write(winner.providerWallet, ADDR.escrow, JobEscrowAbi, "deliver", [BigInt(chainJobId), dhash]);
         deliverTx = r.txHash;
       }
-      await dbDeliver(jobId, dhash, null, deliverTx);
+      await dbOp(() => dbDeliver(jobId, dhash, null, deliverTx));
 
       if (finalState === "delivered") {
         stats.delivered++;
@@ -518,7 +552,7 @@ async function main() {
         const r = await write(cw, ADDR.escrow, JobEscrowAbi, "settle", [BigInt(chainJobId)]);
         settleTx = r.txHash;
       }
-      await dbSettle(jobId, winner.providerId, settleTx);
+      await dbOp(() => dbSettle(jobId, winner.providerId, settleTx));
       stats.settled++;
     } catch (e) {
       console.warn(`  ! storyline failed for ${cw.address.slice(0, 10)}: ${e instanceof Error ? e.message : e}`);
