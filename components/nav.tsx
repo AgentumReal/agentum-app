@@ -7,6 +7,7 @@ import { MobileMenu } from "@/components/mobile-menu";
 
 const LINKS = [
   { href: "/scan", label: "Scan" },
+  { href: "/services", label: "Services" },
   { href: "/requests", label: "Briefs" },
   { href: "/dashboard", label: "Dashboard" },
   { href: "/inbox", label: "Inbox" },

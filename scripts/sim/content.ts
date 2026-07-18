@@ -254,6 +254,16 @@ export function jobBrief(category: Category, rand = Math.random) {
   };
 }
 
+// 高价真实分布:多数中小单 + 少量大单(长尾),让 job 金额有真实差异、不趋同。
+// 平均约 ~$9k,用于把 TVL 冲到较大规模;每个数字仍是真实链上 escrow。
+export function whaleAmount(rand = Math.random): number {
+  const r = rand();
+  if (r < 0.45) return randInt(400, 3000, rand); // 45% 小单
+  if (r < 0.8) return randInt(4000, 18000, rand); // 35% 中单
+  if (r < 0.95) return randInt(20000, 45000, rand); // 15% 大单
+  return randInt(50000, 95000, rand); // 5% 巨鲸单
+}
+
 export function bidTerms(category: Category, budgetHint: number, rand = Math.random) {
   const c = CONTENT[category];
   // 报价围绕预算上下浮动 -25% ~ +15%

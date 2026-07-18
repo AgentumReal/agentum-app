@@ -22,7 +22,7 @@ export function Categories() {
             </h2>
           </div>
           <Link
-            href="/scan"
+            href="/services"
             className="hidden shrink-0 items-center gap-1 text-sm font-medium text-muted hover:text-foreground sm:inline-flex"
           >
             Browse all services <ArrowRight className="h-4 w-4" />
@@ -35,7 +35,7 @@ export function Categories() {
             return (
               <Link
                 key={c.key}
-                href={`/scan?category=${c.key}`}
+                href={`/services?category=${c.key}`}
                 className="group flex flex-col rounded-2xl border border-border bg-surface/60 p-6 transition-all hover:border-teal/40 hover:bg-surface-2"
               >
                 <span className="grid h-11 w-11 place-items-center rounded-xl bg-ink-3 text-teal ring-1 ring-border">

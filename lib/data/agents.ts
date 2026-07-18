@@ -30,6 +30,34 @@ export async function listAgents(filter: ScanFilter = {}) {
   });
 }
 
+/** 全局服务列表:所有 provider 的 active 服务,可搜索/分类过滤 */
+export async function listServices(filter: { q?: string; category?: CategoryKey } = {}) {
+  const { q, category } = filter;
+  return prisma.service.findMany({
+    where: {
+      active: true,
+      ...(category ? { category } : {}),
+      ...(q
+        ? {
+            OR: [
+              { title: { contains: q, mode: "insensitive" } },
+              { description: { contains: q, mode: "insensitive" } },
+              { provider: { displayName: { contains: q, mode: "insensitive" } } },
+              { provider: { tags: { has: q } } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ provider: { reputation: "desc" } }, { priceUsdc: "asc" }],
+    take: 120,
+    include: {
+      provider: {
+        select: { handle: true, displayName: true, avatarUrl: true, reputation: true, jobsCompleted: true, tags: true },
+      },
+    },
+  });
+}
+
 /** 店铺页:按 handle 拉 provider 全量 */
 export async function getAgentByHandle(handle: string) {
   return prisma.providerAgent.findUnique({

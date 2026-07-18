@@ -42,6 +42,7 @@ import {
   jobBrief,
   bidTerms,
   deliverableText,
+  whaleAmount,
   makeHandle,
   toDisplay,
   pick,
@@ -58,9 +59,11 @@ const CFG = {
   batchSize: Number(process.env.BATCH_SIZE ?? 100),
   clientRatio: Number(process.env.CLIENT_RATIO ?? 0.5),
   concurrency: Number(process.env.CONCURRENCY ?? 8),
-  fundPerWallet: process.env.FUND_PER_WALLET ?? "0.004",
+  fundPerWallet: process.env.FUND_PER_WALLET ?? "0.006",
   bidsMin: Number(process.env.BIDS_MIN ?? 1),
   bidsMax: Number(process.env.BIDS_MAX ?? 3),
+  whale: !!process.env.WHALE && process.env.WHALE !== "0", // 高价 job 分布(冲大 TVL)
+  jobsPerClientMax: Number(process.env.JOBS_PER_CLIENT_MAX ?? 1), // 每 client 最多发几单(>1 让 jobs>clients)
   dryRun: !!process.env.DRY_RUN && process.env.DRY_RUN !== "0",
   rpc: process.env.RPC_URL || "https://bsc-testnet-rpc.publicnode.com",
   gasPrice: parseGwei(process.env.GAS_GWEI ?? "3"),
@@ -188,7 +191,7 @@ async function write(
             try {
               const p = decodeEventLog({ abi: abi as never, data: log.data, topics: log.topics });
               if (p.eventName === eventName) {
-                const v = (p.args as Record<string, unknown>)[eventKey];
+                const v = (p.args as unknown as Record<string, unknown>)[eventKey];
                 value = typeof v === "bigint" ? v.toString() : String(v);
                 break;
               }
@@ -479,8 +482,8 @@ async function main() {
       const handle = await uniqueHandle(makeHandle());
       if (!CFG.dryRun) {
         await write(w, ADDR.identity, AgentIdentityAbi, "mint", [w.address, handle]); // client DID
-        await write(w, ADDR.usdt, MockUSDTAbi, "mintTo", [w.address, parseUnits("5000", 18)]); // 领 USDT
-        await write(w, ADDR.usdt, MockUSDTAbi, "approve", [ADDR.escrow, parseUnits("1000000", 18)]); // 预授权
+        await write(w, ADDR.usdt, MockUSDTAbi, "mintTo", [w.address, parseUnits("500000", 18)]); // 领 USDT(够 whale 多单)
+        await write(w, ADDR.usdt, MockUSDTAbi, "approve", [ADDR.escrow, parseUnits("100000000", 18)]); // 预授权
       }
       const uid = await dbOp(() => dbCreateClient(w.address, handle));
       clientIds.set(w.address, uid);
@@ -490,95 +493,125 @@ async function main() {
   });
   console.info(`  ✓ ${clientIds.size} clients ready`);
 
-  // 5) 任务生命周期(每个 client 发一单,随机 provider 竞价,按分布推进)
+  // 5) 任务生命周期(每个 client 发 1~N 单,随机 provider 竞价,按分布推进)
   const providerList = [...provIds.entries()];
-  let stats = { open: 0, escrowed: 0, delivered: 0, settled: 0 };
-  console.info(`  running job lifecycles…`);
+  const stats = { open: 0, escrowed: 0, delivered: 0, settled: 0 };
+
+  async function runOneJob(cw: Wallet, clientId: string) {
+    const category = pick(CATEGORIES);
+    const brief = { ...jobBrief(category), category };
+    if (CFG.whale) brief.budgetHint = whaleAmount(); // 高价分布 → 大 TVL
+    const finalState = chooseFinalState();
+
+    // ① post request
+    let chainRequestId: string | undefined, postTx: string | undefined;
+    if (!CFG.dryRun) {
+      const r = await write(cw, ADDR.escrow, JobEscrowAbi, "postRequest", [`${brief.title} — ${brief.brief}`.slice(0, 300)], "RequestPosted", "requestId");
+      chainRequestId = r.value;
+      postTx = r.txHash;
+    }
+    const requestId = await dbOp(() => dbCreateRequest(clientId, brief, { chainRequestId, txHash: postTx }));
+
+    // ② bids from random providers
+    const bidders = pickRandom(providerList, randInt(CFG.bidsMin, CFG.bidsMax));
+    const bids: { bidId: string; providerWallet: Wallet; providerId: string; amount: number; chainBidIndex?: number }[] = [];
+    for (const [pAddr, pInfo] of bidders) {
+      const pw = providers.find((x) => x.address === pAddr)!;
+      const terms = bidTerms(category, brief.budgetHint);
+      let chainBidIndex: number | undefined, bidTx: string | undefined;
+      if (!CFG.dryRun && chainRequestId) {
+        const r = await write(pw, ADDR.escrow, JobEscrowAbi, "placeBid", [BigInt(chainRequestId), parseUnits(String(terms.amount), 18), BigInt(terms.deliveryDays)], "BidPlaced", "bidIndex");
+        chainBidIndex = r.value ? Number(r.value) : undefined;
+        bidTx = r.txHash;
+      }
+      const bidId = await dbOp(() => dbCreateBid(requestId, pInfo.agentId, terms, { chainBidIndex, txHash: bidTx }));
+      bids.push({ bidId, providerWallet: pw, providerId: pInfo.agentId, amount: terms.amount, chainBidIndex });
+    }
+
+    if (finalState === "open" || bids.length === 0) {
+      stats.open++;
+      return;
+    }
+
+    // ③ accept lowest bid → escrow
+    const winner = bids.reduce((a, b) => (b.amount < a.amount ? b : a));
+    let chainJobId: string | undefined, escrowTx: string | undefined;
+    if (!CFG.dryRun && chainRequestId && winner.chainBidIndex != null) {
+      const r = await write(cw, ADDR.escrow, JobEscrowAbi, "acceptBid", [BigInt(chainRequestId), BigInt(winner.chainBidIndex)], "BidAccepted", "jobId");
+      chainJobId = r.value;
+      escrowTx = r.txHash;
+    }
+    const jobId = await dbOp(() => dbAcceptBid(requestId, clientId, winner.providerId, winner.amount, brief.title, brief.brief, { chainJobId, escrowTxHash: escrowTx }));
+
+    if (finalState === "escrowed") {
+      stats.escrowed++;
+      return;
+    }
+
+    // ④ provider delivers
+    const dtext = deliverableText(category, brief.title);
+    const dhash = keccak256(toBytes(dtext));
+    let deliverTx: string | undefined;
+    if (!CFG.dryRun && chainJobId) {
+      const r = await write(winner.providerWallet, ADDR.escrow, JobEscrowAbi, "deliver", [BigInt(chainJobId), dhash]);
+      deliverTx = r.txHash;
+    }
+    await dbOp(() => dbDeliver(jobId, dhash, null, deliverTx));
+
+    if (finalState === "delivered") {
+      stats.delivered++;
+      return;
+    }
+
+    // ⑤ client settles → payout + reputation
+    let settleTx: string | undefined;
+    if (!CFG.dryRun && chainJobId) {
+      const r = await write(cw, ADDR.escrow, JobEscrowAbi, "settle", [BigInt(chainJobId)]);
+      settleTx = r.txHash;
+    }
+    await dbOp(() => dbSettle(jobId, winner.providerId, settleTx));
+    stats.settled++;
+  }
+
+  console.info(`  running job lifecycles${CFG.whale ? " (whale prices)" : ""}…`);
   await mapLimit(clients, CFG.concurrency, async (cw) => {
-    try {
-      const clientId = clientIds.get(cw.address)!;
-      const category = pick(CATEGORIES);
-      const brief = { ...jobBrief(category), category };
-      const finalState = chooseFinalState();
-
-      // ① post request
-      let chainRequestId: string | undefined, postTx: string | undefined;
-      if (!CFG.dryRun) {
-        const r = await write(cw, ADDR.escrow, JobEscrowAbi, "postRequest", [`${brief.title} — ${brief.brief}`.slice(0, 300)], "RequestPosted", "requestId");
-        chainRequestId = r.value;
-        postTx = r.txHash;
+    const clientId = clientIds.get(cw.address);
+    if (!clientId) return; // client 建立失败,跳过
+    // 每个 client 发 1~jobsPerClientMax 单(偏向少,让 jobs 略多于 clients)
+    const jobsForThisClient = CFG.jobsPerClientMax <= 1 ? 1 : (Math.random() < 0.6 ? 1 : randInt(2, CFG.jobsPerClientMax));
+    for (let k = 0; k < jobsForThisClient; k++) {
+      try {
+        await runOneJob(cw, clientId);
+      } catch (e) {
+        console.warn(`  ! job failed for ${cw.address.slice(0, 10)}: ${e instanceof Error ? e.message : e}`);
       }
-      const requestId = await dbOp(() => dbCreateRequest(clientId, brief, { chainRequestId, txHash: postTx }));
-
-      // ② bids from random providers
-      const bidders = pickRandom(providerList, randInt(CFG.bidsMin, CFG.bidsMax));
-      const bids: { bidId: string; providerWallet: Wallet; providerId: string; amount: number; chainBidIndex?: number }[] = [];
-      for (const [pAddr, pInfo] of bidders) {
-        const pw = providers.find((x) => x.address === pAddr)!;
-        const terms = bidTerms(category, brief.budgetHint);
-        let chainBidIndex: number | undefined, bidTx: string | undefined;
-        if (!CFG.dryRun && chainRequestId) {
-          const r = await write(pw, ADDR.escrow, JobEscrowAbi, "placeBid", [BigInt(chainRequestId), parseUnits(String(terms.amount), 18), BigInt(terms.deliveryDays)], "BidPlaced", "bidIndex");
-          chainBidIndex = r.value ? Number(r.value) : undefined;
-          bidTx = r.txHash;
-        }
-        const bidId = await dbOp(() => dbCreateBid(requestId, pInfo.agentId, terms, { chainBidIndex, txHash: bidTx }));
-        bids.push({ bidId, providerWallet: pw, providerId: pInfo.agentId, amount: terms.amount, chainBidIndex });
-      }
-
-      if (finalState === "open" || bids.length === 0) {
-        stats.open++;
-        return;
-      }
-
-      // ③ accept lowest bid → escrow
-      const winner = bids.reduce((a, b) => (b.amount < a.amount ? b : a));
-      let chainJobId: string | undefined, escrowTx: string | undefined;
-      if (!CFG.dryRun && chainRequestId && winner.chainBidIndex != null) {
-        const r = await write(cw, ADDR.escrow, JobEscrowAbi, "acceptBid", [BigInt(chainRequestId), BigInt(winner.chainBidIndex)], "BidAccepted", "jobId");
-        chainJobId = r.value;
-        escrowTx = r.txHash;
-      }
-      const jobId = await dbOp(() => dbAcceptBid(requestId, clientId, winner.providerId, winner.amount, brief.title, brief.brief, { chainJobId, escrowTxHash: escrowTx }));
-
-      if (finalState === "escrowed") {
-        stats.escrowed++;
-        return;
-      }
-
-      // ④ provider delivers
-      const dtext = deliverableText(category, brief.title);
-      const dhash = keccak256(toBytes(dtext));
-      let deliverTx: string | undefined;
-      if (!CFG.dryRun && chainJobId) {
-        const r = await write(winner.providerWallet, ADDR.escrow, JobEscrowAbi, "deliver", [BigInt(chainJobId), dhash]);
-        deliverTx = r.txHash;
-      }
-      await dbOp(() => dbDeliver(jobId, dhash, null, deliverTx));
-
-      if (finalState === "delivered") {
-        stats.delivered++;
-        return;
-      }
-
-      // ⑤ client settles → payout + reputation
-      let settleTx: string | undefined;
-      if (!CFG.dryRun && chainJobId) {
-        const r = await write(cw, ADDR.escrow, JobEscrowAbi, "settle", [BigInt(chainJobId)]);
-        settleTx = r.txHash;
-      }
-      await dbOp(() => dbSettle(jobId, winner.providerId, settleTx));
-      stats.settled++;
-    } catch (e) {
-      console.warn(`  ! storyline failed for ${cw.address.slice(0, 10)}: ${e instanceof Error ? e.message : e}`);
     }
   });
 
-  // 6) 用真实当前区块刷新 LIVE·BLOCK
-  if (!CFG.dryRun) {
-    const blk = await publicClient.getBlockNumber();
-    await prisma.marketStat.update({ where: { id: 1 }, data: { blockNumber: blk } });
-  }
+  // 6) 按真实行数重算 MarketStat(每个数字都和链上/DB 对得上,天然差异)
+  //    agents = 所有 mint 过 DID 的钱包(clients + providers);providers = 目录里的供给方;
+  //    clients = 发过需求的需求方;jobs = 任务数;TVL = 所有 job 金额之和。
+  const [totalAgents, totalProviders, totalClients, totalJobs, tvlAgg] = await Promise.all([
+    dbOp(() => prisma.user.count()),
+    dbOp(() => prisma.providerAgent.count()),
+    dbOp(() => prisma.user.count({ where: { requests: { some: {} } } })),
+    dbOp(() => prisma.job.count()),
+    dbOp(() => prisma.job.aggregate({ _sum: { amount: true } })),
+  ]);
+  const blk = CFG.dryRun ? BigInt(0) : await publicClient.getBlockNumber();
+  await dbOp(() =>
+    prisma.marketStat.update({
+      where: { id: 1 },
+      data: {
+        totalAgents,
+        totalProviders,
+        totalClients,
+        totalJobs,
+        totalEscrowed: tvlAgg._sum.amount ?? 0,
+        ...(CFG.dryRun ? {} : { blockNumber: blk }),
+      },
+    }),
+  );
 
   const stat = await prisma.marketStat.findUnique({ where: { id: 1 } });
   console.info(`\n✓ done in ${((Date.now() - t0) / 1000).toFixed(0)}s`);

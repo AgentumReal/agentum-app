@@ -56,7 +56,7 @@ async function main() {
         totalJobs: 0,
         totalClients: 0,
         totalProviders: 0,
-        blockNumber: 0n,
+        blockNumber: BigInt(0),
       },
     }),
   );
