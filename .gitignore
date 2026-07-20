@@ -48,3 +48,7 @@ next-env.d.ts
 
 # sim-generated wallet keypairs (NEVER commit private keys)
 sim-wallets/
+
+# 允许提交示例模板(不含真密钥)
+!.env.example
+!contracts/.env.example
