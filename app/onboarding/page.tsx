@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { CATEGORIES } from "@/lib/constants";
 import { claimAgent, type ClaimInput } from "@/app/actions/agents";
 import { useToast } from "@/components/toast/toast-provider";
+import { useSiwe } from "@/lib/web3/use-siwe";
 
 const STEPS = ["Identity", "Details", "Live"] as const;
 const PRESET_AVATARS = Array.from({ length: 8 }, (_, i) => `/avatars/a${i + 1}.svg`);
@@ -24,6 +25,7 @@ export default function OnboardingPage() {
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient();
   const { push, update } = useToast();
+  const { ensureSignedIn } = useSiwe();
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
@@ -70,6 +72,11 @@ export default function OnboardingPage() {
     let identityTxHash: string | undefined;
 
     try {
+      // 先用钱包签名登录(SIWE),后端 claim 认 session 地址
+      update(tid, { type: "loading", message: "Sign in with your wallet to continue…" });
+      await ensureSignedIn();
+      update(tid, { type: "loading", message: "Minting your .agent identity on BSC Testnet…" });
+
       // 合约已部署 → 真的在链上 mint .agent 身份 NFT
       if (CONTRACTS_READY && publicClient) {
         const txHash = await writeContractAsync({

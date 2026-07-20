@@ -10,6 +10,7 @@ import { WalletButton } from "@/components/wallet-button";
 import { getMyAgents } from "@/app/actions/agents";
 import { recordBidPlaced, recordBidAccepted } from "@/app/actions/requests";
 import { useToast } from "@/components/toast/toast-provider";
+import { useSiwe } from "@/lib/web3/use-siwe";
 import { cn } from "@/lib/utils";
 
 type Bid = {
@@ -34,6 +35,7 @@ export function RequestActions({ requestId, chainRequestId, open, clientAddress,
   const { address, isConnected } = useAccount();
   const { placeBid, acceptBid } = useEscrow();
   const { push, update } = useToast();
+  const { ensureSignedIn } = useSiwe();
   const [myAgents, setMyAgents] = useState<{ handle: string; displayName: string }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -56,8 +58,10 @@ export function RequestActions({ requestId, chainRequestId, open, clientAddress,
   async function submitBid() {
     if (!address || !agentHandle || !amount) return;
     setBusy("bid");
-    const tid = push({ type: "loading", message: "Submitting your bid on-chain…" });
+    const tid = push({ type: "loading", message: "Sign in with your wallet to continue…" });
     try {
+      await ensureSignedIn();
+      update(tid, { type: "loading", message: "Submitting your bid on-chain…" });
       let chainBidIndex: number | undefined;
       let bidTxHash: string | undefined;
       if (CONTRACTS_READY && chainRequestId) {
@@ -91,8 +95,10 @@ export function RequestActions({ requestId, chainRequestId, open, clientAddress,
   async function accept(bid: Bid) {
     if (!address) return;
     setBusy(bid.id);
-    const tid = push({ type: "loading", message: "Approving & escrowing on-chain…" });
+    const tid = push({ type: "loading", message: "Sign in with your wallet to continue…" });
     try {
+      await ensureSignedIn();
+      update(tid, { type: "loading", message: "Approving & escrowing on-chain…" });
       let chainJobId: string | undefined;
       let escrowTxHash: string | undefined;
       if (CONTRACTS_READY && chainRequestId && bid.chainBidIndex != null) {

@@ -8,6 +8,7 @@ import { useEscrow } from "@/lib/web3/use-escrow";
 import { CONTRACTS_READY } from "@/lib/web3/contracts";
 import { recordJobOpened } from "@/app/actions/jobs";
 import { useToast } from "@/components/toast/toast-provider";
+import { useSiwe } from "@/lib/web3/use-siwe";
 
 export function HireButton({
   providerHandle,
@@ -28,6 +29,7 @@ export function HireButton({
   const { address, isConnected } = useAccount();
   const { openJob } = useEscrow();
   const { push, update } = useToast();
+  const { ensureSignedIn } = useSiwe();
   const [busy, setBusy] = useState(false);
 
   async function hire() {
@@ -36,8 +38,10 @@ export function HireButton({
       return;
     }
     setBusy(true);
-    const tid = push({ type: "loading", message: "Approving & escrowing USDT on-chain…" });
+    const tid = push({ type: "loading", message: "Sign in with your wallet to continue…" });
     try {
+      await ensureSignedIn();
+      update(tid, { type: "loading", message: "Approving & escrowing USDT on-chain…" });
       let chainJobId: string | undefined;
       let escrowTxHash: string | undefined;
 

@@ -9,6 +9,7 @@ import { useEscrow } from "@/lib/web3/use-escrow";
 import { CONTRACTS_READY } from "@/lib/web3/contracts";
 import { recordJobDelivered, recordJobSettled, recordJobChallenged } from "@/app/actions/jobs";
 import { useToast } from "@/components/toast/toast-provider";
+import { useSiwe } from "@/lib/web3/use-siwe";
 import { uploadFile } from "@/lib/upload";
 
 type Props = {
@@ -24,6 +25,7 @@ export function JobActions({ jobId, chainJobId, status, clientAddress, providerO
   const { address } = useAccount();
   const { deliver, settle, challenge } = useEscrow();
   const { push, update } = useToast();
+  const { ensureSignedIn } = useSiwe();
   const [busy, setBusy] = useState(false);
   const [deliverFile, setDeliverFile] = useState<File | null>(null);
 
@@ -35,6 +37,7 @@ export function JobActions({ jobId, chainJobId, status, clientAddress, providerO
     setBusy(true);
     const tid = push({ type: "loading", message: loadingMsg });
     try {
+      await ensureSignedIn();
       const txHash = await fn();
       update(tid, { type: "success", message: doneMsg, txHash });
       router.refresh();

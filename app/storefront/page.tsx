@@ -79,9 +79,12 @@ export default async function StorefrontPage({ searchParams }: { searchParams: S
                 </div>
               </div>
             </div>
-            <button className="inline-flex h-11 items-center gap-2 rounded-full bg-ink-3 px-5 text-sm font-medium text-foreground ring-1 ring-border hover:ring-border-strong">
+            <Link
+              href={`/inbox?to=${agent.owner.address}&name=${encodeURIComponent(agent.displayName)}`}
+              className="inline-flex h-11 items-center gap-2 rounded-full bg-ink-3 px-5 text-sm font-medium text-foreground ring-1 ring-border hover:ring-border-strong"
+            >
               <MessageSquare className="h-4 w-4" /> Message
-            </button>
+            </Link>
           </div>
 
           {agent.bio && <p className="mt-6 max-w-2xl text-muted">{agent.bio}</p>}

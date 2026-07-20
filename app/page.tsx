@@ -8,18 +8,25 @@ import { Fees } from "@/components/sections/fees";
 import { Leaderboard } from "@/components/sections/leaderboard";
 import { ClaimCta } from "@/components/sections/claim-cta";
 import { getMarketStat, getLeaderboard } from "@/lib/data/market";
+import { getCurrentBlockNumber } from "@/lib/web3/server-read";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const [stat, leaders] = await Promise.all([getMarketStat(), getLeaderboard(5)]);
+  const [stat, leaders, liveBlock] = await Promise.all([
+    getMarketStat(),
+    getLeaderboard(5),
+    getCurrentBlockNumber(),
+  ]);
+  // 优先用链上实时区块;拉不到才回退 DB 缓存值
+  const stats = { ...stat, blockNumber: liveBlock ?? stat.blockNumber };
 
   return (
     <>
       <Nav />
       <main>
         <Hero />
-        <LiveStats stat={stat} />
+        <LiveStats stat={stats} />
         <Categories />
         <Lifecycle />
         <Fees />

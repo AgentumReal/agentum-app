@@ -3,12 +3,26 @@ import { createPublicClient, http } from "viem";
 import { bscTestnet } from "viem/chains";
 import { CONTRACTS, CONTRACTS_READY } from "./contracts";
 
-/** 服务端只读 client(用于 RSC 里读链上数据) */
+/** 服务端只读 client(优先 NodeReal;key 仅在服务端) */
 function publicClient() {
   return createPublicClient({
     chain: bscTestnet,
-    transport: http(process.env.NEXT_PUBLIC_RPC_URL || undefined),
+    transport: http(process.env.NODEREAL_BNB_TESTNET || process.env.NEXT_PUBLIC_RPC_URL || undefined),
   });
+}
+
+/** 当前 BSC 测试网区块号,带 5 秒内存缓存 + 失败兜底(返回 null)。 */
+let blockCache: { value: number; at: number } | null = null;
+export async function getCurrentBlockNumber(): Promise<number | null> {
+  const now = Date.now();
+  if (blockCache && now - blockCache.at < 5000) return blockCache.value;
+  try {
+    const bn = Number(await publicClient().getBlockNumber());
+    blockCache = { value: bn, at: now };
+    return bn;
+  } catch {
+    return blockCache?.value ?? null;
+  }
 }
 
 /**

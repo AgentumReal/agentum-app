@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getOrCreateUser } from "@/lib/auth";
+import { getSessionAddress } from "@/lib/session";
 
 type Result<T = undefined> = { ok: true; data?: T } | { ok: false; error: string };
 
@@ -31,8 +32,10 @@ export async function recordRequestPosted(input: z.infer<typeof PostSchema>): Pr
   const p = PostSchema.safeParse(input);
   if (!p.success) return { ok: false, error: p.error.issues[0]?.message ?? "Invalid input" };
   const d = p.data;
+  const meAddr = await getSessionAddress();
+  if (!meAddr) return { ok: false, error: "Please sign in with your wallet first" };
   try {
-    const client = await getOrCreateUser(d.clientAddress);
+    const client = await getOrCreateUser(meAddr);
     const req = await prisma.jobRequest.create({
       data: {
         title: d.title,
@@ -67,6 +70,8 @@ export async function recordBidPlaced(input: z.infer<typeof BidSchema>): Promise
   const p = BidSchema.safeParse(input);
   if (!p.success) return { ok: false, error: p.error.issues[0]?.message ?? "Invalid input" };
   const d = p.data;
+  const meAddr = await getSessionAddress();
+  if (!meAddr) return { ok: false, error: "Please sign in with your wallet first" };
   try {
     const req = await prisma.jobRequest.findUnique({ where: { id: d.requestId } });
     if (!req || !req.open) return { ok: false, error: "Request not open" };
@@ -76,7 +81,8 @@ export async function recordBidPlaced(input: z.infer<typeof BidSchema>): Promise
       include: { owner: { select: { address: true } } },
     });
     if (!provider) return { ok: false, error: "Provider not found" };
-    if (provider.owner.address.toLowerCase() !== d.providerAddress.toLowerCase()) {
+    // 出价方必须是该 agent 的 owner,且已用该钱包登录
+    if (provider.owner.address.toLowerCase() !== meAddr.toLowerCase()) {
       return { ok: false, error: "Bid must come from the agent owner wallet" };
     }
 
@@ -111,8 +117,10 @@ export async function recordBidAccepted(input: z.infer<typeof AcceptSchema>): Pr
   const p = AcceptSchema.safeParse(input);
   if (!p.success) return { ok: false, error: p.error.issues[0]?.message ?? "Invalid input" };
   const d = p.data;
+  const meAddr = await getSessionAddress();
+  if (!meAddr) return { ok: false, error: "Please sign in with your wallet first" };
   try {
-    const client = await getOrCreateUser(d.clientAddress);
+    const client = await getOrCreateUser(meAddr);
     const req = await prisma.jobRequest.findUnique({ where: { id: d.requestId } });
     if (!req || !req.open) return { ok: false, error: "Request not open" };
     if (req.clientId !== client.id) return { ok: false, error: "Not your request" };
@@ -144,10 +152,7 @@ export async function recordBidAccepted(input: z.infer<typeof AcceptSchema>): Pr
       data: { open: false, acceptedJobId: job.id },
     });
 
-    await prisma.marketStat.update({
-      where: { id: 1 },
-      data: { totalJobs: { increment: 1 }, totalEscrowed: { increment: bid.amount } },
-    });
+    // 市场统计由链上 indexer 独占维护
 
     return { ok: true, data: { jobId: job.id } };
   } catch (err) {

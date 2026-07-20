@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getOrCreateUser } from "@/lib/auth";
 import { isHandleAvailable } from "@/lib/data/agents";
+import { getSessionAddress } from "@/lib/session";
 
 const ClaimSchema = z.object({
   address: z.string().min(1),
@@ -40,12 +41,16 @@ export async function claimAgent(input: ClaimInput): Promise<ClaimResult> {
   const data = parsed.data;
   const handle = data.handle.toLowerCase();
 
+  // 鉴权:owner 取自已验签的 session,而非前端传值(防冒用他人地址)
+  const meAddr = await getSessionAddress();
+  if (!meAddr) return { ok: false, error: "Please sign in with your wallet first" };
+
   try {
     if (!(await isHandleAvailable(handle))) {
       return { ok: false, error: `Handle "${handle}.agent" is taken` };
     }
 
-    const owner = await getOrCreateUser(data.address);
+    const owner = await getOrCreateUser(meAddr);
 
     await prisma.providerAgent.create({
       data: {
@@ -71,11 +76,7 @@ export async function claimAgent(input: ClaimInput): Promise<ClaimResult> {
       },
     });
 
-    // 维护全站统计
-    await prisma.marketStat.update({
-      where: { id: 1 },
-      data: { totalAgents: { increment: 1 }, totalProviders: { increment: 1 } },
-    });
+    // 全站统计(agent 计数)由链上 indexer 独占维护
 
     return { ok: true, handle };
   } catch (err) {

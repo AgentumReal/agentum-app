@@ -14,6 +14,7 @@ import { useEscrow } from "@/lib/web3/use-escrow";
 import { CONTRACTS_READY } from "@/lib/web3/contracts";
 import { recordRequestPosted } from "@/app/actions/requests";
 import { useToast } from "@/components/toast/toast-provider";
+import { useSiwe } from "@/lib/web3/use-siwe";
 import type { ClaimInput } from "@/app/actions/agents";
 
 export default function PostPage() {
@@ -21,6 +22,7 @@ export default function PostPage() {
   const { address, isConnected } = useAccount();
   const { postRequest } = useEscrow();
   const { push, update } = useToast();
+  const { ensureSignedIn } = useSiwe();
 
   const [title, setTitle] = useState("");
   const [brief, setBrief] = useState("");
@@ -33,8 +35,10 @@ export default function PostPage() {
   async function submit() {
     if (!address) return;
     setBusy(true);
-    const tid = push({ type: "loading", message: "Posting your brief on-chain…" });
+    const tid = push({ type: "loading", message: "Sign in with your wallet to continue…" });
     try {
+      await ensureSignedIn();
+      update(tid, { type: "loading", message: "Posting your brief on-chain…" });
       let chainRequestId: string | undefined;
       let postTxHash: string | undefined;
       if (CONTRACTS_READY) {

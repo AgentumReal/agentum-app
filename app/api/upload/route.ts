@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { rateLimit, clientIp } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
@@ -7,6 +8,10 @@ const MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 
 /** 上传文件(头像 / 交付物)→ 存 Postgres → 返回 { id, url } */
 export async function POST(req: NextRequest) {
+  // 限流:每 IP 5 分钟最多 20 次上传(防刷库)
+  if (!rateLimit(`upload:${clientIp(req)}`, 20, 5 * 60_000)) {
+    return NextResponse.json({ error: "Too many uploads, slow down" }, { status: 429 });
+  }
   try {
     const form = await req.formData();
     const file = form.get("file");

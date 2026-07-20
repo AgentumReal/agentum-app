@@ -269,5 +269,6 @@ model MarketStat {
   totalClients   Int      @default(0)
   totalProviders Int      @default(0)
   blockNumber    BigInt   @default(0)
+  indexedBlock   BigInt   @default(0) // indexer 游标:已处理到的区块
   updatedAt      DateTime @updatedAt
 }

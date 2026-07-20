@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getOrCreateUser } from "@/lib/auth";
 import { listJobsForAddress } from "@/lib/data/jobs";
+import { getSessionAddress } from "@/lib/session";
 
 /** 收件箱:拉取当前钱包相关的所有 job */
 export async function getMyJobs(address: string) {
@@ -29,8 +30,11 @@ export async function recordJobOpened(input: z.infer<typeof OpenSchema>): Promis
   if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   const d = parsed.data;
 
+  const meAddr = await getSessionAddress();
+  if (!meAddr) return { ok: false, error: "Please sign in with your wallet first" };
+
   try {
-    const client = await getOrCreateUser(d.clientAddress);
+    const client = await getOrCreateUser(meAddr);
     const provider = await prisma.providerAgent.findUnique({ where: { handle: d.providerHandle } });
     if (!provider) return { ok: false, error: "Provider not found" };
     if (provider.ownerId === client.id) return { ok: false, error: "Cannot hire your own agent" };
@@ -54,10 +58,7 @@ export async function recordJobOpened(input: z.infer<typeof OpenSchema>): Promis
       },
     });
 
-    await prisma.marketStat.update({
-      where: { id: 1 },
-      data: { totalJobs: { increment: 1 }, totalEscrowed: { increment: d.amount } },
-    });
+    // 市场统计由链上 indexer 独占维护(避免和链上事件双计)
 
     return { ok: true, data: { id: job.id } };
   } catch (err) {
@@ -112,6 +113,7 @@ async function transition(
 export async function recordJobDelivered(input: z.infer<typeof TxSchema>): Promise<Result> {
   const p = TxSchema.safeParse(input);
   if (!p.success) return { ok: false, error: "Invalid input" };
+  if (!(await getSessionAddress())) return { ok: false, error: "Please sign in with your wallet first" };
   return transition(p.data.jobId, "DELIVERED", "delivered", {
     txHash: p.data.txHash,
     deliverableHash: p.data.deliverableHash,
@@ -123,6 +125,7 @@ export async function recordJobDelivered(input: z.infer<typeof TxSchema>): Promi
 export async function recordJobSettled(input: z.infer<typeof TxSchema>): Promise<Result> {
   const p = TxSchema.safeParse(input);
   if (!p.success) return { ok: false, error: "Invalid input" };
+  if (!(await getSessionAddress())) return { ok: false, error: "Please sign in with your wallet first" };
   return transition(p.data.jobId, "SETTLED", "settled", {
     txHash: p.data.txHash,
     note: "released to provider",
@@ -132,6 +135,7 @@ export async function recordJobSettled(input: z.infer<typeof TxSchema>): Promise
 export async function recordJobChallenged(input: z.infer<typeof TxSchema>): Promise<Result> {
   const p = TxSchema.safeParse(input);
   if (!p.success) return { ok: false, error: "Invalid input" };
+  if (!(await getSessionAddress())) return { ok: false, error: "Please sign in with your wallet first" };
   return transition(p.data.jobId, "CHALLENGED", "challenged", {
     txHash: p.data.txHash,
     note: "sent to 3-evaluator panel",
