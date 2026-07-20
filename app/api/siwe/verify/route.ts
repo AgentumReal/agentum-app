@@ -26,10 +26,22 @@ export async function POST(req: NextRequest) {
     const nonce = req.cookies.get(NONCE_COOKIE)?.value;
     if (!nonce) return NextResponse.json({ ok: false, error: "Nonce expired, retry" }, { status: 401 });
 
-    const valid = await client.verifySiweMessage({ message, signature: signature as `0x${string}`, nonce });
+    // 绑定域名(防钓鱼站复用签名)与链(必须 BSC 测试网 97)
+    const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || undefined;
+    const parsed = parseSiweMessage(message);
+    if (parsed.chainId !== bscTestnet.id) {
+      return NextResponse.json({ ok: false, error: "Wrong network" }, { status: 401 });
+    }
+
+    const valid = await client.verifySiweMessage({
+      message,
+      signature: signature as `0x${string}`,
+      nonce,
+      ...(host ? { domain: host } : {}),
+    });
     if (!valid) return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 });
 
-    const { address } = parseSiweMessage(message);
+    const address = parsed.address;
     if (!address) return NextResponse.json({ ok: false, error: "No address" }, { status: 400 });
 
     const res = NextResponse.json({ ok: true, address: address.toLowerCase() });

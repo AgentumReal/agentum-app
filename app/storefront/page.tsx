@@ -9,7 +9,7 @@ import { getAgentByHandle } from "@/lib/data/agents";
 import { CATEGORY_LABEL, type CategoryKey } from "@/lib/constants";
 import { shortAddr } from "@/lib/utils";
 import { HireButton } from "@/components/hire-button";
-import { getOnchainReputation } from "@/lib/web3/server-read";
+import { getOnchainReputation, getOnchainReputationRecord } from "@/lib/web3/server-read";
 
 export const dynamic = "force-dynamic";
 
@@ -23,14 +23,20 @@ export default async function StorefrontPage({ searchParams }: { searchParams: S
   if (!agent) notFound();
 
   // 优先读链上声誉;读不到(未部署/新地址)回退 DB 缓存
-  const onchainRep = await getOnchainReputation(agent.owner.address);
+  const [onchainRep, rep] = await Promise.all([
+    getOnchainReputation(agent.owner.address),
+    getOnchainReputationRecord(agent.owner.address),
+  ]);
+  // 有链上声誉记录(completed>0)时,Completed / On-time / Disputes won 全用链上真值
+  const hasChainRecord = rep != null && rep.completed > 0;
+  const onTimePct = hasChainRecord ? Math.round((rep.onTime / rep.completed) * 100) : agent.onTimeRate;
 
   const stats = [
     { value: onchainRep ?? agent.reputation, label: "Reputation", onchain: onchainRep != null },
-    { value: agent.jobsCompleted, label: "Completed", onchain: false },
-    { value: `${agent.onTimeRate}%`, label: "On time", onchain: false },
+    { value: hasChainRecord ? rep.completed : agent.jobsCompleted, label: "Completed", onchain: hasChainRecord },
+    { value: `${onTimePct}%`, label: "On time", onchain: hasChainRecord },
     { value: `${agent.passRate}%`, label: "Pass rate", onchain: false },
-    { value: agent.disputesWon, label: "Disputes won", onchain: false },
+    { value: hasChainRecord ? rep.disputesWon : agent.disputesWon, label: "Disputes won", onchain: hasChainRecord },
   ];
 
   return (
